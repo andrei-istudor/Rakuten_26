@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torchvision import datasets
 from torchvision.transforms import v2
+from torchvision import models
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from tqdm import tqdm
@@ -19,11 +20,6 @@ def clean_preprocess(preprocess):
     of already scaled images.
     The method is a bit hardcoded, but works well for AlexNet, ResNet, etc.
     """
-    # if hasattr(preprocess, 'transforms'):
-    #     new_transforms = [t for t in preprocess.transforms if "Resize" not in str(t) and "CenterCrop" not in str(t)]
-    #     if new_transforms:
-    #         return nn.Sequential(*new_transforms)
-    # return preprocess
     return v2.Normalize(mean=preprocess.mean, std=preprocess.std)
 
 def getImageLoader(train_path='../image_scaled_train', test_path='../image_scaled_test', save_mapping_to=None):
@@ -63,6 +59,150 @@ def getImageLoader(train_path='../image_scaled_train', test_path='../image_scale
     dataloader_test = DataLoader(test_dataset, batch_size=256, shuffle=True, num_workers=4, pin_memory=True)
 
     return dataloader_train, dataloader_test
+
+
+def prepare_model(model_name, num_classes, fine_tune_type='none', checkpoint_path=None, dropout=0.0):
+    """
+    Prepares the model for training.
+    fine_tune_type: 'none' (model frozen - inference) or 'classifier' (freeze backbone) or 'full' (unfreeze all) or 'resnet_selective' (specific blocks)
+    checkpoint_path: if present, represents the path from which to load the model weights from
+    """
+    if model_name == 'alexnet':
+        weights = models.AlexNet_Weights.DEFAULT
+        model = models.alexnet(weights=weights)
+        preprocess = weights.transforms()
+        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
+
+    elif model_name == 'vgg16':
+        weights = models.VGG16_Weights.DEFAULT
+        model = models.vgg16(weights=weights)
+        preprocess = weights.transforms()
+        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
+
+    elif model_name == 'resnet50':
+        weights = models.ResNet50_Weights.DEFAULT
+        model = models.resnet50(weights=weights)
+        preprocess = weights.transforms()
+        old_fc = model.fc
+        model.fc = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(model.fc.in_features, 1024),
+            nn.Dropout(p=dropout),
+            nn.ReLU(),
+            nn.Linear(1024, num_classes)
+        )
+        # else:
+        #     model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif model_name == 'vit_b_16':
+        weights = models.ViT_B_16_Weights.DEFAULT
+        model = models.vit_b_16(weights=weights)
+        preprocess = weights.transforms()
+        model.heads.head = nn.Linear(model.heads.head.in_features, num_classes)
+    else:
+        raise ValueError(f"Model {model_name} not supported")
+
+    # Clean up preprocess: Remove Resize and CenterCrop as images are already 224x224
+    # This preserves edge details that would otherwise be cropped out.
+    preprocess = clean_preprocess(preprocess)
+    print("Preprocess updated: Removed Resize and CenterCrop (images are already scaled).")
+
+    # Load checkpoint if provided
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        try:
+            state_dict = torch.load(checkpoint_path)
+            model.load_state_dict(state_dict)
+            print(f"Successfully loaded checkpoint from {checkpoint_path}")
+        except Exception as e:
+            print(f"Error loading checkpoint {checkpoint_path}: {e}")
+            print("Proceeding with pre-trained ImageNet weights.")
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    if fine_tune_type == 'none':
+        #inference
+        pass
+    else:
+        # Set requires_grad based on fine_tune_type
+        # if fine_tune_type == 'classifier':
+        # Always training the classifier
+        if model_name in ['alexnet', 'vgg16']:
+            for param in model.classifier.parameters():
+                param.requires_grad = True
+        elif model_name == 'resnet50':
+            for param in model.fc.parameters():
+                param.requires_grad = True
+        elif model_name == 'vit_b_16':
+            for param in model.heads.parameters():
+                param.requires_grad = True
+
+        if fine_tune_type == 'full':
+            if model_name == 'resnet50':
+                for param in model.layer4.parameters():
+                    param.requires_grad = True
+                for param in model.layer3.parameters():
+                    param.requires_grad = True
+            else:
+                for param in model.parameters():
+                    param.requires_grad = True
+        elif fine_tune_type == 'resnet_selective' and model_name == 'resnet50':
+            for param in model.layer4.parameters():
+                param.requires_grad = True
+
+            # fc_module = model.fc if isinstance(model.fc, nn.Linear) else model.fc[1]
+            for param in model.fc.parameters():
+                param.requires_grad = True
+
+    return model, preprocess
+
+
+def get_optimizer(model, model_name, fine_tune_type, lr_classifier=1e-2, lr_backbone=1e-3):
+    if fine_tune_type == 'full':
+        if model_name == 'alexnet':
+            optimizer = optim.Adam([
+                {'params': model.classifier.parameters(), 'lr': lr_classifier},
+                {'params': model.features.parameters(), 'lr': lr_backbone}
+            ])  # , momentum=0.9)
+        elif model_name == 'vgg16':
+            optimizer = optim.Adam([
+                {'params': model.classifier.parameters(), 'lr': lr_classifier},
+                {'params': model.features.parameters(), 'lr': lr_backbone}
+            ])  # , momentum=0.9)
+        elif model_name == 'resnet50':
+            # For ResNet, 'features' are everything except 'fc'
+            # backbone_params = [model.layer4.parameters(), model.layer3.parameters()] #[p for n, p in model.named_parameters() if 'fc' not in n]
+            # fc_params = model.fc.parameters() #if isinstance(model.fc, nn.Linear) else model.fc[1].parameters()
+            optimizer = optim.Adam([
+                {'params': model.fc.parameters(), 'lr': lr_classifier},
+                {'params': model.layer4.parameters(), 'lr': lr_backbone},
+                {'params': model.layer3.parameters(), 'lr': lr_backbone}
+            ])  # , momentum=0.9)
+        elif model_name == 'vit_b_16':
+            backbone_params = [p for n, p in model.named_parameters() if 'heads' not in n]
+            optimizer = optim.Adam([
+                {'params': model.heads.parameters(), 'lr': lr_classifier},
+                {'params': backbone_params, 'lr': lr_backbone}
+            ])  # , momentum=0.9)
+    elif fine_tune_type == 'resnet_selective' and model_name == 'resnet50':
+        # Ensure layer4 and fc are unfrozen
+        for param in model.parameters():
+            param.requires_grad = False
+
+        for param in model.layer4.parameters():
+            param.requires_grad = True
+        for param in model.fc.parameters():
+            param.requires_grad = True
+
+        optimizer = optim.Adam([
+            {'params': model.fc.parameters(), 'lr': lr_classifier},
+            {'params': model.layer4.parameters(), 'lr': lr_backbone}
+        ])  # , momentum=0.9)
+    else:
+        # Default for classifier-only (only optimized parameters that require grad)
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
+                               lr=lr_classifier)  # , momentum=0.9)
+
+    return optimizer
 
 def trainTestModel(model, epochs, dataloader_train, dataloader_test, preprocess, optimizer, scheduler,
                    log_file=None,
