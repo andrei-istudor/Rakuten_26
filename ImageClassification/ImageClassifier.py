@@ -1,3 +1,4 @@
+import PIL.Image
 import numpy as np
 import torch
 from torchvision import models, transforms
@@ -9,17 +10,33 @@ import json
 
 
 class ImageClassifier:
-    def __init__(self, model_name, checkpoint_path, num_classes=27, device='cuda' if torch.cuda.is_available() else 'cpu'):
-        self.model, self.preprocess = prepare_model(model_name, checkpoint_path=checkpoint_path,
-                                                                      num_classes=num_classes)
+    def __init__(self, model_type, model_file_path, num_classes=27, device='cuda' if torch.cuda.is_available() else 'cpu'):
+        self.model, self.preprocess, self.preprocess_input = prepare_model(model_type, checkpoint_path=model_file_path,
+                                                                           num_classes=num_classes)
 
         self.device = device
         self.model.to(device)
         self.model.eval()
 
+    def predict_image_mem(self, img, device='cuda' if torch.cuda.is_available() else 'cpu'):
+        """
+
+        :param img: PIL.Image of any size - better be square
+        :param device:
+        :return: predictions for img
+        """
+        img_t = (transforms.ToTensor()(img)).to(torch.float)
+        input_tensor = self.preprocess_input(img_t).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            output = self.model(input_tensor)
+            probabilities = torch.nn.functional.softmax(output[0], dim=-1)
+
+            return probabilities.detach().cpu().numpy()
+
     def predict_image(self, image_path, device='cuda' if torch.cuda.is_available() else 'cpu'):
         """
-        Runs inference on a single image file.
+        Runs inference on a single image file already resized - for usage on the scaled dataset.
         """
         img = (transforms.ToTensor()(Image.open(image_path).convert('RGB'))).to(torch.float)
         input_tensor = self.preprocess(img).unsqueeze(0).to(device)
@@ -117,6 +134,12 @@ if __name__ == "__main__":
     model_folder = args.model_folder
     model_name = args.model_name
     model_path = os.path.join(model_folder, model_name)
+
+    # model_folder = "."
+    # model_name = "resnet50_36_from_resnet50_30_epoch_25_epoch_10.model"
+    # model_path = os.path.join(model_folder, model_name)
+    img = PIL.Image.open(args.file_name)
+
     json_path = os.path.join(model_folder, 'classes.json')
     class_names = []
     with open(json_path, 'r') as f:
@@ -124,7 +147,8 @@ if __name__ == "__main__":
 
 
     ic = ImageClassifier(MODEL_TYPE, model_path)
-    probs = ic.predict_image(args.file_name)
+    # probs = ic.predict_image(args.file_name)
+    probs = ic.predict_image_mem(img)
     class_id = probs.argmax().item()
     # print()
     class_name = class_names[probs.argmax().item()]

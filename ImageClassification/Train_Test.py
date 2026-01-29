@@ -101,10 +101,11 @@ def prepare_model(model_name, num_classes, fine_tune_type='none', checkpoint_pat
     else:
         raise ValueError(f"Model {model_name} not supported")
 
+    preprocess_input = weights.transforms()
     # Clean up preprocess: Remove Resize and CenterCrop as images are already 224x224
     # This preserves edge details that would otherwise be cropped out.
     preprocess = clean_preprocess(preprocess)
-    print("Preprocess updated: Removed Resize and CenterCrop (images are already scaled).")
+    # print("Preprocess updated: Removed Resize and CenterCrop (images are already scaled).")
 
     # Load checkpoint if provided
     if checkpoint_path and os.path.exists(checkpoint_path):
@@ -153,7 +154,7 @@ def prepare_model(model_name, num_classes, fine_tune_type='none', checkpoint_pat
             for param in model.fc.parameters():
                 param.requires_grad = True
 
-    return model, preprocess
+    return model, preprocess, preprocess_input
 
 
 def get_optimizer(model, model_name, fine_tune_type, lr_classifier=1e-2, lr_backbone=1e-3):
