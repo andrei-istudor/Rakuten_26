@@ -1,3 +1,9 @@
+---
+noteId: "a29f4270fd0711f0bc74e5a9575ee52b"
+tags: []
+
+---
+
 # Text pipeline
 
 ## Exploration (rakuten_exploring)
